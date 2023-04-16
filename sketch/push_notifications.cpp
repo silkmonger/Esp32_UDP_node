@@ -22,7 +22,7 @@
 
 #include "shared_vars.h"
 extern char string_var[][STRING_VARS_SIZE];
-char push_notification_buffer[PUSH_NOTIFICATION_STRING_SIZE];
+// char push_notification_buffer[PUSH_NOTIFICATION_STRING_SIZE];
 
 void debug_error(String);
 void debug_ok(String);
@@ -39,6 +39,7 @@ namespace my_PN
 
   const uint8_t API_TOKEN_SIZE = 32;
   const uint8_t API_USER_SIZE = 32;
+  const uint8_t PUSH_NOTIFICATION_STRING_SIZE=16;
 
   const char * server = "https://api.pushover.net/1/messages.json";
   const char * test_server = "www.howsmyssl.com";
@@ -48,6 +49,7 @@ namespace my_PN
   char pushover_api_user[API_USER_SIZE];
   bool pushover_api_cerdentials_ready = false;
   char push_notification_buffer[PUSH_NOTIFICATION_STRING_SIZE];
+  char gpio_notification_buffer[PUSH_NOTIFICATION_STRING_SIZE];
 
   // const char * dummy_api_json_response = "{'coord': {'lon': 34.8265, 'lat': 32.1701}, 'weather': [{'id': 801, 'main': 'Clouds', 'description': 'few clouds', 'icon': '02d'}], 'base': 'stations', 'main': {'temp': 295.23, 'feels_like': 294.28, 'temp_min': 294.46, 'temp_max': 295.23, 'pressure': 1013, 'humidity': 30}, 'visibility': 10000, 'wind': {'speed': 3.09, 'deg': 190}, 'clouds': {'all': 20}, 'dt': 1678968166, 'sys': {'type': 1, 'id': 6845, 'country': 'IL', 'sunrise': 1678938623, 'sunset': 1678981720}, 'timezone': 7200, 'id': 294778, 'name': 'Herzliya', 'cod': 200}";
   char api_response[] = "{\"coord\": {\"lon\": 34.8265, \"lat\": 32.1701}, \"weather\": [{\"id\": 801, \"main\": \"Clouds\", \"description\": \"few clouds\", \"icon\": \"02d\"}], \"base\": \"stations\", \"main\": {\"temp\": 295.23, \"feels_like\": 294.28, \"temp_min\": 294.46, \"temp_max\": 295.23, \"pressure\": 1013, \"humidity\": 30}, \"visibility\": 10000, \"wind\": {\"speed\": 3.09, \"deg\": 190}, \"clouds\": {\"all\": 20}, \"dt\": 1678968166, \"sys\": {\"type\": 1, \"id\": 6845, \"country\": \"IL\", \"sunrise\": 1678938623, \"sunset\": 1678981720}, \"timezone\": 7200, \"id\": 294778, \"name\": \"Herzliya\", \"cod\": 200}";
@@ -56,6 +58,14 @@ namespace my_PN
 
   const uint16_t HTTP_RESPONSE_BUFFER_SIZE = 1024;
   char http_response_buffer[HTTP_RESPONSE_BUFFER_SIZE];
+
+  typedef enum
+  {
+    udp_command,
+    gpio_event,
+    reserved_0,
+    reserved_1
+  } set_text_target_id_t;
 
   // push notification on GPIO value change (added 2023/04/12)
   bool           push_on_gpio_enabled;
@@ -68,14 +78,15 @@ namespace my_PN
   unsigned long  push_on_gpio_backoff_window_millis;
   bool           push_on_gpio_backoff_wraparound_flag;                 // millis() wrap-around logic
   // added 2023-04-13
-  uint16_t       push_on_gpio_supressed_events;
+  uint16_t       push_on_gpio_suppressed_events;
   unsigned long  push_on_gpio_last_edge_detect_millis;
   bool           push_on_gpio_backoff_flag;
+  uint32_t       push_on_gpio_debounce_millis;
 
   //
   // GPIO events log
   //
-  const uint8_t  GPEL_SIZE=6;
+  const uint8_t  GPEL_SIZE=15;
   uint32_t       gpel_event_list[GPEL_SIZE];
   uint8_t        gpel_write_ptr;
   uint8_t        gpel_read_ptr;
@@ -280,7 +291,7 @@ namespace my_PN
     return rv;
   } // uint32_t test_post_request()
 
-  uint32_t push_notification(void)
+  uint32_t push_notification(char* message_buffer)
   {
     if(!pushover_api_cerdentials_ready)
     {
@@ -295,7 +306,7 @@ namespace my_PN
       Serial.println("Connection failed!");
     else
     {
-      String message = strlen(push_notification_buffer)==0 ? "123" : String(push_notification_buffer);
+      String message = strlen(message_buffer)==0 ? "!#?" : String(message_buffer);
       String request_url = "https://api.pushover.net/1/messages.json?token=" + String(pushover_api_token) + "&user=" 
                                                                              + String(pushover_api_user) + "&message=" + message;
       Serial.println("Connected to server! (text: " + message + ")");
@@ -345,7 +356,7 @@ namespace my_PN
       rv = char_count;
     } // successful connection
     return rv;
-  } // uint32_t push_notification(void)
+  } // uint32_t push_notification(char* message_buffer)
 
   void parse_json_test(void)
   {
@@ -408,7 +419,7 @@ namespace my_PN
      return rv;
   } // uint32_t set_pushover_credentials(void)
 
-  uint16_t set_push_notification_text(uint8_t string_var_index)
+  uint16_t set_push_notification_text(uint8_t string_var_index, set_text_target_id_t target_id)
   {
     // return zero for error, or text length upon success
     if(string_var_index >= STRING_VARS_COUNT)
@@ -423,10 +434,25 @@ namespace my_PN
       return 0;
     }
 
-    strcpy(push_notification_buffer, string_var[string_var_index]);
-    debug_ok("push notification text set to '" + String(push_notification_buffer) + "'");
+    switch(target_id)
+    {
+      case udp_command:
+        strcpy(push_notification_buffer, string_var[string_var_index]);
+        debug_ok("push notification text set to '" + String(push_notification_buffer) + "'");
+        break;
+
+      case gpio_event:
+        strcpy(gpio_notification_buffer, string_var[string_var_index]);
+        break;
+
+      default:
+        debug_error("set_text_target_id_t: reserved value");
+        break;
+    }
+    // strcpy(push_notification_buffer, string_var[string_var_index]);
+    // debug_ok("push notification text set to '" + String(push_notification_buffer) + "'");
     return strlen(string_var[string_var_index]);
-  } // uint16_t set_push_notification_text(uint8_t string_var_index)
+  } // uint16_t set_push_notification_text(uint8_t string_var_index, set_text_target_id_t target_id)
 
   void purge_gpio_event_log(void)
   {
@@ -476,11 +502,12 @@ namespace my_PN
     push_on_gpio_previous_read_value = LOW;
     push_on_gpio_backoff_seconds = 30;
     push_on_gpio_backoff_wraparound_flag = false;
-    push_on_gpio_supressed_events = 0;
+    push_on_gpio_suppressed_events = 0;
     push_on_gpio_last_edge_detect_millis = 0;
+    push_on_gpio_debounce_millis = 1000;                 // one second debounce interval
   } // void initialize_push_on_gpio(void)
 
-  uint32_t enable_push_on_gpio(uint8_t pin_number, bool edge_polarity, uint16_t backoff_seconds)
+  uint32_t enable_push_on_gpio(uint8_t pin_number, bool edge_polarity, uint16_t backoff_seconds, uint16_t debounce_seconds)
   {
     unsigned long _millis = millis();
     if(pin_number == 0)
@@ -501,13 +528,15 @@ namespace my_PN
       push_on_gpio_previous_read_value = digitalRead(pin_number);
       push_on_gpio_next_push_millis = _millis;
       push_on_gpio_backoff_window_millis = 1000*MAX(push_on_gpio_backoff_seconds, push_on_gpio_minimum_backoff);
+      push_on_gpio_debounce_millis = MAX(1000, MIN(1000*debounce_seconds, push_on_gpio_backoff_window_millis/8));
       Serial.println("enable_push_on_gpio: enabled, pin " + String(push_on_gpio_pin_number) + String(edge_polarity ? " rising" : " falling") + 
                      " edge, " + String(push_on_gpio_backoff_seconds) + " seconds backoff");
+      Serial.println("                     push_on_gpio_debounce_millis = " + String(push_on_gpio_debounce_millis));
     }
     push_on_gpio_backoff_flag = false;
     push_on_gpio_backoff_wraparound_flag = false;
     return push_on_gpio_backoff_window_millis;
-  } // uint32_t enable_push_on_gpio(uint8_t pin_number, bool edge_polarity, uint16_t backoff_seconds)
+  } // uint32_t enable_push_on_gpio(uint8_t pin_number, bool edge_polarity, uint16_t backoff_seconds, uint16_t debounce_seconds)
 
   void update_push_on_gpio_next_push(unsigned long _millis)
   {
@@ -525,6 +554,7 @@ namespace my_PN
 
   void check_gpio(unsigned long _millis)
   {
+    static char text[16];
     if(push_on_gpio_enabled)
     {
       int read_value = digitalRead(push_on_gpio_pin_number);
@@ -551,9 +581,20 @@ namespace my_PN
       {
         push_on_gpio_backoff_flag = false;
         Serial.println("push_on_gpio: backoff period (" + String(push_on_gpio_backoff_window_millis) + " milliseconds) ended");
-        Serial.println("push_on_gpio: " + String(push_on_gpio_supressed_events) + " events suppressed");
+        Serial.println("push_on_gpio: " + String(push_on_gpio_suppressed_events) + " events suppressed");
         led_off();
         print_gpio_event_list();
+        // send end of backoff push notification
+        if((strlen(gpio_notification_buffer) > 0) && (push_on_gpio_backoff_window_millis > 899)) // if test message configured, and backoff window is gte 15 minutes
+        {
+          if(push_on_gpio_suppressed_events == 0)
+            push_notification("backoff done");
+          else
+          {
+            snprintf(text, 16, "%i suppressed", push_on_gpio_suppressed_events);
+            push_notification(text);
+          }
+        }
         purge_gpio_event_log();
       }
     } // backoff end logic
@@ -561,10 +602,11 @@ namespace my_PN
 
   void gpio_event_handler(unsigned long _millis)
   {
-    // supress notification during backoff window.
+    // suppress notification during backoff window.
     // how do we protect agains wraparound error?
     // 
     // if((_millis > push_on_gpio_next_push_millis) && !push_on_gpio_backoff_wraparound_flag)
+    bool blcoked_by_debouncer = false;
     if(!push_on_gpio_backoff_flag)
     {
       // we are out of the backoff window, HTTP API request should be issued
@@ -574,8 +616,12 @@ namespace my_PN
       if(next_next < _millis)
         push_on_gpio_backoff_wraparound_flag = true;
       push_on_gpio_next_push_millis = next_next;
-      push_on_gpio_supressed_events = 0;
+      push_on_gpio_suppressed_events = 0;
       push_on_gpio_backoff_flag = true;
+      if(strlen(gpio_notification_buffer) > 0)
+        push_notification(gpio_notification_buffer);
+      else
+        Serial.println("[NOTOK] no push notification: GPIO notification is NULL");
       led_on(true);
       write_to_gpio_event_log(_millis);
     }
@@ -588,18 +634,20 @@ namespace my_PN
       //                events counter. push notification, however, is not being sent out.
 
       Serial.println("GPIO edge ignored (backoff ends in " + String(push_on_gpio_next_push_millis-_millis) + " milliseconds)");
-      if(_millis > push_on_gpio_last_edge_detect_millis + 1000) // simple debounce logic - ignore edges less than one second apart
+      if(_millis > push_on_gpio_last_edge_detect_millis + push_on_gpio_debounce_millis)
       {
-        push_on_gpio_supressed_events++;
+        push_on_gpio_suppressed_events++;
         write_to_gpio_event_log(_millis);
-        Serial.println("GPIO Event: supressed (" + String(push_on_gpio_supressed_events) + ") so far");
+        Serial.println("GPIO Event: suppressed (" + String(push_on_gpio_suppressed_events) + ") so far");
       }
       else
       {
-        Serial.println("GPIO Event: filtered out by debounce logic");
+        Serial.println("GPIO Event: filtered out by debounce logic (" + String(push_on_gpio_debounce_millis) + ") millis");
+        blcoked_by_debouncer = true;
       }            
     }
-    push_on_gpio_last_edge_detect_millis = _millis;
+    if(!blcoked_by_debouncer)
+      push_on_gpio_last_edge_detect_millis = _millis;
   } // void gpio_event_handler(unsigned long _millis)
 
   void erase_credentials(void)
@@ -607,9 +655,46 @@ namespace my_PN
     pushover_api_cerdentials_ready = false;
     strcpy(pushover_api_token, "");
     strcpy(pushover_api_user, "");
+    strcpy(push_notification_buffer, "");
+    strcpy(gpio_notification_buffer, "");
     initialize_push_on_gpio();
     purge_gpio_event_log();
   } // void erase_credentials(void)
+
+  uint8_t read_numbers_list_1(uint8_t* write_ptr)
+  {
+    // for(uint8_t n=0; n<4; n++)
+    // {
+    //   *write_ptr = 100+n;
+    //   write_ptr++;
+    // }
+    uint8_t offset = 0;
+    *(write_ptr + (offset++)) = push_on_gpio_pin_number;
+    // offset 1:  backoff window size (seconds)
+    *(write_ptr + (offset++)) = (push_on_gpio_backoff_seconds >> 0) & 0xff;
+    *(write_ptr + (offset++)) = (push_on_gpio_backoff_seconds >> 8) & 0xff;
+    // offset 3: debounce interval
+    *(write_ptr + (offset++)) = (push_on_gpio_debounce_millis >>  0) & 0xff;
+    *(write_ptr + (offset++)) = (push_on_gpio_debounce_millis >>  8) & 0xff;
+    *(write_ptr + (offset++)) = (push_on_gpio_debounce_millis >> 16) & 0xff;
+    *(write_ptr + (offset++)) = (push_on_gpio_debounce_millis >> 24) & 0xff;
+    // offset 7:  backoff window size (milliseconds)    
+    *(write_ptr + (offset++)) = (push_on_gpio_backoff_window_millis >> 0) & 0xff;
+    *(write_ptr + (offset++)) = (push_on_gpio_backoff_window_millis >> 8) & 0xff;
+    *(write_ptr + (offset++)) = (push_on_gpio_backoff_window_millis >> 16) & 0xff;
+    *(write_ptr + (offset++)) = (push_on_gpio_backoff_window_millis >> 24) & 0xff;
+    // offset 11: suppressed GPIO events count
+    *(write_ptr + (offset++)) = (push_on_gpio_suppressed_events >> 0) & 0xff; 
+    *(write_ptr + (offset++)) = (push_on_gpio_suppressed_events >> 8) & 0xff; 
+    // offset 13: a few GPIO event related boolean flags
+    *(write_ptr + (offset++)) = (push_on_gpio_backoff_flag              ? 0x01 : 0)
+                              | (push_on_gpio_enabled                   ? 0x02 : 0)
+                              | (push_on_gpio_true_rising_false_falling ? 0x04 : 0)
+                              | (pushover_api_cerdentials_ready         ? 0x08 : 0);
+
+    Serial.println("read_numbers_list_1() generates " + String(offset) + " octets payload");
+    return offset;
+  } // uint8_t read_numbers_list_1(uint8_t* write_ptr)
 
 } // namespace my_PN
 
@@ -617,13 +702,17 @@ uint32_t pn_get_request_test(void){ return my_PN::get_request_test(); }
 uint32_t pn_openweather_get_request(void){ return my_PN::openweather_get_request(); }
 void pn_parse_json_test(void){ my_PN::parse_json_test(); }
 uint32_t pn_test_post_request(void){ return my_PN::test_post_request(); }
-uint32_t pn_push_notification(void){ return my_PN::push_notification(); }
+uint32_t pn_push_notification(void){ return my_PN::push_notification(my_PN::push_notification_buffer); }
 uint32_t pn_set_pushover_credentials(void){ return my_PN::set_pushover_credentials(); }
-uint16_t pn_set_push_notification_text(uint8_t string_var_index){ return my_PN::set_push_notification_text(string_var_index); }
+uint16_t pn_set_push_notification_text(uint8_t string_var_index){ return my_PN::set_push_notification_text(string_var_index, my_PN::udp_command); }
+uint16_t pn_set_gpio_notification_text(uint8_t string_var_index){ return my_PN::set_push_notification_text(string_var_index, my_PN::gpio_event); }
+
 void pn_erase_credentials(void){ my_PN::erase_credentials(); }
 
 void pn_check_gpio(unsigned long _millis){ my_PN::check_gpio(_millis); }
-uint32_t pn_gpio_enable(uint8_t pin_number, bool edge_polarity, uint16_t backoff_seconds)
+uint32_t pn_gpio_enable(uint8_t pin_number, bool edge_polarity, uint16_t backoff_seconds, uint16_t debounce_seconds)
 { 
-  return my_PN::enable_push_on_gpio(pin_number, edge_polarity, backoff_seconds); 
+  return my_PN::enable_push_on_gpio(pin_number, edge_polarity, backoff_seconds, debounce_seconds); 
 }
+
+uint8_t pn_read_numbers_list_1(uint8_t* write_ptr){ return my_PN::read_numbers_list_1(write_ptr); }

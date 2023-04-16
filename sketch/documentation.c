@@ -1,5 +1,81 @@
 /*
 
+2023/04/16 16:44 - sketch date code: 2023-04-16.002
+
+2023/04/16 11:19 - first test of string interrupts to UDP client is working ok. with accopanying threaded 
+                   client that is able to separate inbound responses from interrupts.
+                   using UDP_port tab 'send_to_remote_machine()' method this was simple enough.
+                   the method though, is only useful for strings, as it calls 'udp.println()' UDP class function.
+                   to send bytes, or octets, it seems we need to resort to udp.write(buffer, size), as we do
+                   when sending UDP (V1) responses to client requests.
+                   library reference at: https://reference.arduino.cc/reference/en/libraries/wifi/wifiudp.write/
+
+                 - what do I have in mind for my_UDP binary interrupt API?
+                   say we have a send_bin_interrupt(ptr, size) API, where the caller only supplies pointer to
+                   interrupt payload, and length of payload.
+                   - at the very minimum, unlike string interrupts, binary interrupts must contain some level of
+                     data integrity checks, such is CRC32, sequence number etc.
+
+                 - in the interest of not over complicating things, here's what we'll do:
+                   for now, the binary interrupt interface (API call) will be very simple: only two uint8_t
+                   arguments to pass - interrupt number, and priority.
+                   - the outgoing packet format will be:
+                     - 0xff (interrupt)
+                     - 0x02 (bytes interrupt)
+                     - 0x01 (bytes interrupt subtype)
+                     - [7:0] - interrupt number      (0 through 255, although only 0 through 7 will have ACK/retransmit handshake)
+                     - [7:0] - interrupt priority
+                     - [7:0] - sequence number       (advances with EACH ountbound (subtype 1) interrupt packet)
+                     - [7:0] - retry count           (once we add interrupt retransmit mechanism, this count will start from zero, and increment, untel interrupt is acknowledged by client)
+                     - [31:0] - CRC32
+
+2023/04/15 16:01 - what's next?
+                 - big things :) the python UDP client (AKA management console) have been enhanced to a threaded
+                   architecture, so that it is ready to receive UDP packets from the endpoint at any time.
+                   this was done with endpoint->console 'interrupts' in mind.
+                   - the way is now ready for the sketch to start sending UDP interrupts to the python client.
+                     endpoint->client packets' first octet value of 255 (0xFF) will be used from now on to mark
+                     out of band traffic.
+                     the sebsequent (second) octet is OOB subtype. 0x01 marks 'interrupt'
+
+                 - adding client version variable (uint16_t)
+                   value calculation: 10*(datetime.date(YYYY,MM,DD)-datetime.date(2023,1,1)).days + tick
+                   with 10 ticks per day limit, this should get us covered until year 2040
+
+2023/04/15 02:43 - when going to super long (minutes) debounce time constants, debounce logic needs to change.
+                   'last edge millis' should only be registered if it passes through the debouncer.
+                   edges blocked be the debounce logic should not be registered as last edge millis. if they do,
+                   debounce might block events endlessly, which is not what we want (debateable?)
+
+2023/04/15 01:32 - 'V1_CMD_CONFIG_PUSHOVER_GPIO' API change: adding two octets for debounce duration (in seconds)
+
+2023/04/14 15:17 - done nearly 20 hours testing with RCWL-0516 motion sensor, revealing, or clarifying some
+                   additional needs.
+                   1. UDP access to reading GPIO event statistics.
+                   2. Possibly sending a second push notification at the end of each backoff window.
+                      - let user know how many additional trigger events occured during the backoff window.
+                      - send this push notification as a low priority notification.
+
+                 - section 1 above could lead to adding a new generic command, for reading longer lists of 
+                   numerical values. this may have a simular syntax to the already existing 'V1_CMD_READ_UINT16',
+                   'V1_CMD_READ_OVER_STRING_VAR' etc. i.e. one octet opcode followed by 8bit (preferably 16bit)
+                   read selection index.
+                   unlike 'V1_CMD_READ_UINT16' though, the response will be a variable length response.
+
+2023/04/13 23:30 - successful real-life push notification on GPIO test conducted.
+                 - it seems as if we need better support for reading GPIO event statistics over UDP, now that
+                   endpoint start being deployed away from the Arduin IDE, and Serial.println() isn't reachable.
+
+2023/04/13 22:04 - uploaded to github.
+                   url: https://github.com/silkmonger/Esp32_UDP_node
+
+                 - doing some cleanup: 'push_notification_buffer' was in too broad scope, addessible to several
+                                       tabs. trying to keep it confined to 'push_notifications.cpp'
+
+                 - enhancing 'set_push_notification_text()' - additional two bit argument will allow using this
+                   method to set GPIO notification text as well (and leave room for two additional buffers if
+                   need arises)
+
 2023/04/13 16:55 - adding GPIO events log in 'push_notifications' module.
                  - later same day: added RCWL-0516 microwave motion sensor, and saw that it actually works!
                                    microwave sensor test was done on a S2 mini board, while the sensor is soldered
@@ -265,10 +341,14 @@
  byte N-5:   sequence number
  last four bytes: CRC32
 
- v1 response format
+ V1 response format
  byte 0: 1 - version
  byte 1:     status (0: OK, 1, 2 ... - error codes)
  ...
  byte N-5:   sequence number
  last four bytes: CRC32
+
+ Out of band packet format
+ byte 0: 0xff - OOB
+ byte 1: OOB subtype
  */

@@ -12,7 +12,7 @@
 #define __SKETCH_MAIN__
 #include "shared_vars.h"
 
-extern char push_notification_buffer[PUSH_NOTIFICATION_STRING_SIZE];
+// extern char push_notification_buffer[PUSH_NOTIFICATION_STRING_SIZE];
 String wired_lan_mac_address; // wired LAN events, if applicable, overwrite this with correct MAC address
 bool   wired_lan_connection;
 bool   wifi_connection_lost;
@@ -102,12 +102,15 @@ bool UDP_enabled(void);
 void UDP_receive_and_print_to_serial(void);
 void UDP_receive_and_acknowledge(void);
 void UDP_restart(void);
-void pn_erase_credentials(void);
+bool UDP_send_string_interrupt(char*);
+bool UDP_send_bytes_interrupt(uint8_t, uint8_t);
 void pn_check_gpio(unsigned long);
+void pn_erase_credentials(void);
+void ch_setup(void);
 // const char* ssid       = "YOUR_SSID";
 // const char* password   = "YOUR_PASS";
-const char* ssid       = "Ta600";
-const char* password   = "10203040";
+const char* ssid       = "enter ssid";
+const char* password   = "enter wifi key";
 
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 7200;
@@ -257,10 +260,11 @@ void setup()
   //   strcpy(string_var[i], string_var_initial_value[i]);
 
   pn_erase_credentials();
-  strcpy(push_notification_buffer, "");
+  // strcpy(push_notification_buffer, "");
   delay(1000);
 
   UDP_enable();
+  ch_setup();
 } // void setup()
 
 void update_gpios(void)
@@ -311,6 +315,8 @@ void loop()
     printLocalTime();
     // oled_text(ip_address);
     oled_text(shortTimeStringBuff, ip_address + " (" + String(count) + ")");
+    // UDP_send_string_interrupt("---");
+    UDP_send_bytes_interrupt(0, 0);
 
     serial_print_time = millis_now;
     count++;

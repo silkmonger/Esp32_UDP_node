@@ -27,7 +27,9 @@ uint32_t pn_test_post_request(void);
 uint32_t pn_push_notification(void);
 uint32_t pn_set_pushover_credentials(void);
 uint16_t pn_set_push_notification_text(uint8_t string_var_index);
-uint32_t pn_gpio_enable(uint8_t pin_number, bool edge_polarity, uint16_t backoff_seconds);
+uint16_t pn_set_gpio_notification_text(uint8_t string_var_index);
+uint32_t pn_gpio_enable(uint8_t, bool, uint16_t, uint16_t);
+uint8_t pn_read_numbers_list_1(uint8_t* write_ptr);
 void oled_text(String, String);
 void led_on(bool turn_it_on);
 
@@ -58,6 +60,8 @@ namespace my_CH
   const int V1_CMD_SET_LED_PIN                = 17;
   const int V1_CMD_READ_OVER_STRING_VAR       = 18;
   const int V1_CMD_CONFIG_PUSHOVER_GPIO       = 19;
+  const int V1_CMD_READ_LIST                  = 20;
+  const int V1_CMD_WRITE_INTEGER              = 21;
   const int V1_CMD_RESERVED                   = 32;  // for extended commands. if first octet is 0x20, additional three octets build the opcode, making for 16777216 (2^24) additional opcodes
 
   const int V1_UINT16_VARIABLE_ZERO_CONST           = 0;
@@ -70,6 +74,11 @@ namespace my_CH
   const int V1_UINT16_VARIABLE_GPIO_INPUT_VALUE     = 7;
   // const int V1_UINT16_VARIABLE_WIFI_BSSID           = 7; // need to remove this!! replaced by 'V1_CMD_READ_BSSID_AS_STRING'
 
+  const uint16_t V1_READ_NUMBERS_LIST_0_THROUGH_32        = 0;
+  const uint16_t V1_READ_NUMBERS_LIST_PUSH_NOTIFICATION_1 = 1;
+
+  const uint16_t V1_WRITE_INT_ID_CLIENT_VERSION           = 0;
+
   const int V1_READ_OVER_STRVAR_QBF                 = 0x0000;
   const int V1_READ_OVER_STRVAR_WIFIBSSID           = 0x0001;
 
@@ -79,15 +88,22 @@ namespace my_CH
   char* cmd_request_buffer;
   int   cmd_request_length;
 
-  const int MAX_RESPONSE_SIZE = 128;
-  uint8_t response_buffer[MAX_RESPONSE_SIZE];
+  const int MAX_RESPONSE_SIZE = 128;            // this is where 'command handler' places header + payload
+  const int RESPONSE_TRAILER_SIZE = 6;          // this is where UDP logic adds sequence number and CRC32
+  uint8_t response_buffer[MAX_RESPONSE_SIZE + RESPONSE_TRAILER_SIZE];
   unsigned response_length;
 
-  const uint8_t V1_RESPONSE_STATUS_OK = 0;
+  uint16_t udp_client_version;                  // version of python (typically) client we talk to over UDP
 
+  const uint8_t V1_RESPONSE_STATUS_OK = 0;
+  const uint8_t V1_RESPONSE_STATUS_NOTOK = 1;
+
+  // private function prototypes
   void quick_brown_fox_response(void);
   uint8_t build_v1_read_string_variable_response(uint8_t);
   bool perform_read_to_string_variable(uint8_t, uint16_t);
+  bool build_read_list_response(uint16_t);
+  bool write_integer_handler(uint16_t);
 
   uint8_t variable_index;
   uint16_t ros_index;             // read over string
@@ -235,7 +251,8 @@ namespace my_CH
         int variable_id;
         long r = 0;
         uint32_t http_result;
-        uint16_t gpvar16bit;
+        uint16_t uint16_arg_1;
+        uint16_t uint16_arg_2;
         uint8_t line1_index;
         uint8_t line2_index;
         bool    bool_arg_1;
@@ -391,12 +408,17 @@ namespace my_CH
 
           case V1_CMD_SET_PUSH_NOTIFICATION_TEXT:
             // command copies specified string variable  to push notification test buffer
-            variable_id = int(buffer[2]);
-            Serial.println("'V1_CMD_SET_PUSH_NOTIFICATION_TEXT' (string var " + String(variable_id) + ")");
+            variable_id = int(buffer[2] & 0x7F);
+            bool_arg_1 = (buffer[2] & 0x80) == 0x80 ? true : false;  // UDP command vs GPIO event notification text
+            Serial.println("'V1_CMD_SET_PUSH_NOTIFICATION_TEXT' (string var " + String(variable_id) + ", " +  
+                           String(bool_arg_1 ? "GPIO event" : "UDP command") + ")");
             // Serial.println("[NOTOK] command logic not implemented");
-            gpvar16bit = pn_set_push_notification_text(variable_id);
-            build_v1_response_uint16_t_payload(gpvar16bit>0 ? OK_STATUS : NOTOK_STATUS, gpvar16bit);
-            if(gpvar16bit == 0) debug_error("failed to set push notification text");
+            if(bool_arg_1)
+              uint16_arg_1 = pn_set_gpio_notification_text(variable_id);
+            else
+              uint16_arg_1 = pn_set_push_notification_text(variable_id);
+            build_v1_response_uint16_t_payload(uint16_arg_1>0 ? OK_STATUS : NOTOK_STATUS, uint16_arg_1);
+            if(uint16_arg_1 == 0) debug_error("failed to set push notification text");
             break;
 
           case V1_CMD_OLED_TEXT:
@@ -486,14 +508,37 @@ namespace my_CH
             //   backoff window size, in milliseconds
             line1_index = (uint8_t)buffer[2] & 0x7F;                              // pin number
             bool_arg_1 = (uint8_t)buffer[2] & 0x08 == 0x08 ? false : true;        // polarity
-            gpvar16bit = (uint8_t)buffer[3] + ((uint8_t)buffer[4] << 8);          // backoff window (seconds)
+            uint16_arg_1 = (uint8_t)buffer[3] + ((uint8_t)buffer[4] << 8);        // backoff window (seconds)
+            uint16_arg_2 = (uint8_t)buffer[5] + ((uint8_t)buffer[6] << 8);        // debounce window (seconds)
             Serial.println("'V1_CMD_CONFIG_PUSHOVER_GPIO' " + 
                            String(line1_index) + ", " + String(bool_arg_1) + ", " + 
-                           String(gpvar16bit) + " seconds backoff");
+                           String(uint16_arg_1) + " seconds backoff, " +
+                           String(uint16_arg_2) + " seconds debounce");
             // pn_gpio_enable( line1_index,
             //                 bool_arg_1,
-            //                 gpvar16bit );
-            build_v1_response_uint32_t_payload(OK_STATUS, pn_gpio_enable(line1_index, bool_arg_1, gpvar16bit ));
+            //                 uint16_arg_1 );
+            build_v1_response_uint32_t_payload(OK_STATUS, pn_gpio_enable(line1_index, bool_arg_1, uint16_arg_1, uint16_arg_2));
+            break;
+
+          case V1_CMD_READ_LIST:
+            // 2023/04/14 - new command to read lists of numbers
+            // arguments: 16bit read content select
+            uint16_arg_1 = (uint8_t)buffer[2] + ((uint8_t)buffer[3] << 8);
+            Serial.println("'V1_CMD_READ_LIST' " + String(uint16_arg_1));
+            if(build_read_list_response(uint16_arg_1))
+              Serial.println("[OK] response length = " + String(response_length));
+            else
+              Serial.println("[NOTOK] failed preparing response");
+            // build_v1_response_uint32_t_payload(NOTOK_STATUS, 0xDEADBEEF);
+            break;
+
+          case V1_CMD_WRITE_INTEGER:
+            // 2023/04/15 - new command to write integer
+            // arguments: 16bit write content select
+            //   payload: one or more bytes to construct integer value (index dependant, little endian)
+            uint16_arg_1 = (uint8_t)buffer[2] + ((uint8_t)buffer[3] << 8);
+            Serial.println("'V1_CMD_WRITE_INTEGER' " + String(uint16_arg_1));
+            build_v1_response_uint32_t_payload(write_integer_handler(uint16_arg_1) ? V1_RESPONSE_STATUS_OK : V1_RESPONSE_STATUS_NOTOK, 0x0);
             break;
 
           default:
@@ -583,9 +628,75 @@ namespace my_CH
     return success;
   } // bool perform_read_to_string_variable(uint8_t var_index, uint16_t switch_index)
 
+  bool build_read_list_response(uint16_t list_id)
+  {
+    bool valid_id = true;
+    response_length = 2;
+    switch(list_id)
+    {
+      case V1_READ_NUMBERS_LIST_0_THROUGH_32:
+        //
+        for(uint8_t n = 0; n < 32 ; n++)
+          response_buffer[2+n] = n;
+        response_length += 32;
+        break;
+
+      case V1_READ_NUMBERS_LIST_PUSH_NOTIFICATION_1:
+        //
+        response_length += pn_read_numbers_list_1(&response_buffer[2]);
+        break;
+
+      default:
+        valid_id = false;
+        break;
+    }
+    response_buffer[0] = VERSION1;
+    response_buffer[1] = valid_id ? OK_STATUS : NOTOK_STATUS;
+    if(response_length >= MAX_RESPONSE_SIZE)
+    {
+      response_buffer[1] = NOTOK_STATUS;
+      response_length = MAX_RESPONSE_SIZE-1;
+      Serial.println("[NOTOK] response_length exceeded limit");
+    }
+    return valid_id;    
+  } // bool build_read_list_response(uint16_t list_id)
+
+  bool write_integer_handler(uint16_t int_id)
+  {
+    const uint8_t payload_start = 4;
+    bool success = true;
+    switch(int_id)
+    {
+      case V1_WRITE_INT_ID_CLIENT_VERSION:
+        if(cmd_request_length == 2+9)  // all 'write integer' inbound packets contain 9 octets except write value
+        {
+          udp_client_version = cmd_request_buffer[payload_start] + (cmd_request_buffer[payload_start+1] << 8);
+          Serial.println("udp_client_version = " + String(udp_client_version));
+        }          
+        else
+        {
+          debug_error("cmd_request_length != 6 (" + String(cmd_request_length) + ")");
+          success = false;
+        }
+        break;
+
+      default:
+        success = false;
+        break;
+    }
+    return success;
+  } // bool write_integer_handler(uint16_t int_id)
+
+  void setup(void)
+  {
+    udp_client_version = 0x0000;
+  }
+
 } // namespace myCH
 
 unsigned ch_handle_char_buffer_command_message(char * buffer, int length){ return my_CH::handle_char_buffer_command_message(buffer, length); }
 uint8_t * ch_response_buffer(void){ return my_CH::response_buffer; }
 unsigned ch_response_length(void){ return my_CH::response_length; }
+void ch_setup(void){ my_CH::setup(); }
+uint16_t ch_udp_client_version(void){ return my_CH::udp_client_version; }
 // void ch_reset_response_length(void){ my_CH::response_length=0; }
